@@ -9,8 +9,7 @@ import StatsBase
 
 # Core code
 include("pmdi.jl")
-# include("pmdi_inf.jl")
-# include("pmdi2.jl")
+include("__pmdi.jl")
 include("misc.jl")
 include("update_hypers.jl")
 
@@ -29,7 +28,7 @@ include("output_analysis/feature_select_plots.jl")
 
 
 
-export pmdi, pmdi2
+export pmdi,
         gaussian_normalise!, coerce_categorical,
         plot_phi_chain, plot_phi_matrix,
         plot_nclust_chain, plot_nclust_hist,

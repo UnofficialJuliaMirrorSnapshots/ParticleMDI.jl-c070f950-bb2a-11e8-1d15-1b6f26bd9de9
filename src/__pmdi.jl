@@ -9,34 +9,12 @@ using Statistics
 using StatsBase
 
 """
-`pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
-ρ::Float64, iter::Int64, outputFile::String, initialise::Bool,
-output_freq::Int64)`
-Runs particleMDI on specified datasets
-## Input
-- `dataFiles::Vector` a vector of K data matrices to be analysed
-- `dataTypes::Vector` a vector of K datatypes. Independent multivariate normals can be
-specified with `particleMDI.gaussianCluster`
-- `N::Int64` the maximum number of clusters to fit
-- `particles::Int64` the number of particles
-- `ρ::Float64` proportion of allocations assumed known in each MCMC iteration
-- `iter::Int64` number of iterations to run
-- `outputFile::String` specification of a CSV file to store output
-- `thin::Int64` how frequently should observations be stored to file. `thin = 2` will store every other observation. Default is `thin = 1` (no thinning)
-- `featureSelect::Union{String, Nothing}` If `== nothing` feature selection will not be performed. Otherwise, specify a .csv file whil will record feature selection indicators for each dataset.
-- `dataNames` if `== nothing` dataset names will be assigned. Otherwise pass a vector of strings labelling each dataset.
-## Output
-Outputs a .csv file, each row containing:
-- Mass parameter for datasets `1:K`
-- Φ value for `binomial(K, 2)` pairs of datasets
-- c cluster allocations for observations `1:n` in datasets `1:k`
-If featureSelect is specified also outputs a .csv file, each row containing:
-- Binary flag indicating feature selection for each feature in each dataset for each iteration
+This is a test file. It runs exactly the same as pmdi but returns some internals.
+Should not be used.
 """
-function pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
-    ρ::Float64, iter::Int64, outputFile::String;
-     thin::Int64 = 1,
-     featureSelect::Union{String, Nothing} = nothing,
+function __pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
+    ρ::Float64, iter::Int64;
+     featureSelect::Union{Bool, Nothing} = nothing,
      dataNames = nothing)
 
     K       = length(dataFiles) # No. of datasets
@@ -111,9 +89,6 @@ function pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
         end
     else
         featureNames = ["$(dataNames[k])_d$d" for k in 1:K for d in 1:size(dataFiles[k], 2)]
-        writedlm(featureSelect, reshape(featureNames, 1, length(featureNames)), ',')
-        featureFile = open(featureSelect, "a")
-        writedlm(featureFile, [featureFlag...;]', ',')
     end
 
 
@@ -151,11 +126,8 @@ function pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
                "ll";
                ["$(dataNames[k])_n$i" for k in 1:K for i in 1:n_obs]]
     out =  reshape(out, 1, length(out))
-    writedlm(outputFile, out, ',')
-    fileid = open(outputFile, "a")
     ll = 0
     ll1 = time_ns()
-    writedlm(fileid, [M; Φ; ll;  s[1:(n_obs * K)]]', ',')
 
     order_obs = collect(1:n_obs)
     n1 = floor(Int64, ρ * n_obs)
@@ -223,11 +195,11 @@ function pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
                     # fprob_key = hash(sum(particle_k[:, p]))
                     # fprob_key = string(particle_k[:, p])
 
-                    if fprob_done[particle_id[p, k]]
+                    if fprob_done[particle_id[p]]
                         for n in 1:N
-                        fprob[n] = fprob_dict[n, particle_id[p, k]]
+                        fprob[n] = fprob_dict[n, particle_id[p]]
                         end
-                        logweight[p] += fprob_dict[end, particle_id[p, ]]
+                        logweight[p] += fprob_dict[end, particle_id[p]]
                     else
                         for n in 1:N
                              # fprob[n] = Π[n, k] * exp(fprob[n] - max_logprob)
@@ -244,10 +216,10 @@ function pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
                             fprob[n] = fprob[n] / fprob[N]
                         end
                         # fprob = fprob ./ maximum(fprob)
-                        fprob_dict[1:(end - 1), particle_id[p, k]] = fprob
+                        fprob_dict[1:(end - 1), particle_id[p]] = fprob
                         fprob_dict[end, particle_id[p]] =  log(sum(fprob)) + max_logprob
                         logweight[p] += log(sum(fprob)) + max_logprob
-                        fprob_done[particle_id[p, k]] = true
+                        fprob_done[particle_id[p]] = true
                     end
                     # Set reference trajectory
                     if p != 1
@@ -269,6 +241,7 @@ function pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
                     sstar[p, i, k] = new_s
                 end
                 particle_id[:, k] = canonicalise_IDs(particle_id[:, k])
+
                 # Add observation to new cluster
                 max_k = maximum(particle_k)
                 for p in unique(sstar_id_k)
@@ -305,7 +278,6 @@ function pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
                 for k in 1:K
                     particle[:, :, k] = particle[:, partstar, k]
                     particle_id[:, k] = canonicalise_IDs(particle_id[partstar, k])
-                    # particle_id[:, k] = denserank(particle_id[partstar, k])
                     sstar[:, :, k] = sstar[partstar, :, k]
                     for (i, id) in enumerate(sort(unique(particle[:, :, k])))
                         if id !== i
@@ -356,16 +328,6 @@ function pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
         align_labels!(s, Φ, γc, N, K)
 
         ll = (time_ns() - ll1) / 1.0e9
-        if it % thin == 0
-            writedlm(fileid, [M; Φ; ll; s[1:(n_obs * K)]]', ',')
-            if featureSelect != nothing
-                writedlm(featureFile, [featureFlag...;]', ',')
-            end
-        end
     end
-    close(fileid)
-    if featureSelect != nothing
-        close(featureFile)
-    end
-    return
+    return particle, clusters
 end
