@@ -9,11 +9,33 @@ using Statistics
 using StatsBase
 
 """
-This is a test file. It runs exactly the same as pmdi but returns some internals.
-Should not be used.
+`pmdi3(dataFiles, dataTypes, N::Int64, particles::Int64,
+ρ::Float64, iter::Int64, outputFile::String, initialise::Bool,
+output_freq::Int64)`
+Runs particleMDI on specified datasets
+## Input
+- `dataFiles::Vector` a vector of K data matrices to be analysed
+- `dataTypes::Vector` a vector of K datatypes. Independent multivariate normals can be
+specified with `particleMDI.gaussianCluster`
+- `N::Int64` the maximum number of clusters to fit
+- `particles::Int64` the number of particles
+- `ρ::Float64` proportion of allocations assumed known in each MCMC iteration
+- `iter::Int64` number of iterations to run
+- `outputFile::String` specification of a CSV file to store output
+- `thin::Int64` how frequently should observations be stored to file. `thin = 2` will store every other observation. Default is `thin = 1` (no thinning)
+- `featureSelect::Union{String, Nothing}` If `== nothing` feature selection will not be performed. Otherwise, specify a .csv file whil will record feature selection indicators for each dataset.
+- `dataNames` if `== nothing` dataset names will be assigned. Otherwise pass a vector of strings labelling each dataset.
+## Output
+Outputs a .csv file, each row containing:
+- Mass parameter for datasets `1:K`
+- Φ value for `binomial(K, 2)` pairs of datasets
+- c cluster allocations for observations `1:n` in datasets `1:k`
+If featureSelect is specified also outputs a .csv file, each row containing:
+- Binary flag indicating feature selection for each feature in each dataset for each iteration
 """
-function __pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
-    ρ::Float64, iter::Int64;
+function pmdi3(dataFiles, dataTypes, N::Int64, particles::Int64,
+    ρ::Float64, iter::Int64, outputFile::String;
+     thin::Int64 = 1,
      featureSelect::Union{String, Nothing} = nothing,
      dataNames = nothing)
 
@@ -52,11 +74,9 @@ function __pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
 
     # The corresponding gammas
     Γc = Matrix{Float64}(undef, N ^ K, K)
-    log_γ = log.(γc)
     for k = 1:K
-        Γc[:, k] = view(log.(γc[:, k]), c_combn[:, k])
+        Γc[:, k] = log.(γc[:, k][c_combn[:, k]])
     end
-
 
     # Which Φ value is activated by each of the above combinations
     Φ_index = K > 1 ? Matrix{Bool}(undef, N ^ K, Int64(K * (K - 1) / 2)) : fill(1, (N, 1))
@@ -74,13 +94,6 @@ function __pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
     Z = update_Z(Φ, Φ_index, Γc)
     v = update_v(n_obs, Z)
 
-    # Particle weights
-    logweight = zeros(Float64, particles)
-    # Ancestor weights for ancestor sampling
-    # ancestor_weights = zeros(Float64, particles)
-    # Mutation weights
-    logprob = Matrix{Float64}(undef, N * particles + 1, K)
-    fprob = Vector{Float64}(undef, N)
     # Feature selection index
     featureFlag = [rand(Bool, size(dataFiles[k], 2)) for k in 1:K]
     if featureSelect == nothing
@@ -106,24 +119,28 @@ function __pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
         featureNull[k] = - calc_logmarginal(nullCluster[k])
     end
 
+    # Set up storage for particle information
     # particle matches the cluster labels to the cluster IDs
-    # particle = [fill(1, (N, particles)) for k in 1:K]
-    particle = ones(Int, N, particles, K)
-    particle_id = ones(Int, particles, K)
-    fprob_dict = Matrix{Float64}(undef, N + 1, particles)
-    fprob_done = Vector{Bool}(undef, particles)
-    # logprob_particle = [Matrix{Float64}(undef, N, particles) for k in 1:K]
-    logprob = Matrix{Float64}(undef, N * particles + 1, K)
-    # logprob_particle = zeros(Float64, N, particles, K)
-    logprob_particle = view(logprob, particle)
-
+    particle = [[Particle(n_obs, N)] for k in 1:K]
+    for k in 1:K
+        particle[k][1].ndescendants = particles
+    end
+    # How many particles does this particle equate to?
+    num_particles = [zeros(Int, K)]
+    # Particle weights
+    logweight = zeros(Float64, particles, K)
     # A vector containing all of the clusters
-    clusters = [Vector{dataTypes[k]}(undef, N * particles + 1) for k in 1:K]
-    # Keep track of how many copies of a cluster exists
-    clusters_counts = zeros(Int, N * particles + 1, K)
+    clusters = [[dataTypes[k](dataFiles[k])] for k in 1:K]
+    # How many particles is this cluster present in?
+    # Is this cluster available?
+    cluster_free = [ones(Bool, N * particles + 1) for k in 1:K]
+    # logprob is prob of assigning obs to cluster in respective position
+    logprob = [Vector{Float64}(undef, N * particles + 1) for k in 1:K]
+    fprob = Vector{Float64}(undef, N)
+    descendants = zeros(Int, particles)
 
-    sstar_id = Matrix{Int64}(undef, particles, K)
-    sstar = zeros(Int64, particles, n_obs, K)
+    # sstar_id = Matrix{Int64}(undef, particles, K)
+    # sstar = zeros(Int64, particles, n_obs, K)
     out = [map(x -> @sprintf("MassParameter_%d", x), 1:K);
                map((x, y) -> @sprintf("phi_%d_%d", x, y),
                calculate_Φ_lab(K)[:, 1],
@@ -131,23 +148,19 @@ function __pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
                "ll";
                ["$(dataNames[k])_n$i" for k in 1:K for i in 1:n_obs]]
     out =  reshape(out, 1, length(out))
-    # writedlm(outputFile, out, ',')
-    # fileid = open(outputFile, "a")
+    writedlm(outputFile, out, ',')
+    fileid = open(outputFile, "a")
     ll = 0
     ll1 = time_ns()
-    # writedlm(fileid, [M; Φ; ll;  s[1:(n_obs * K)]]', ',')
+    writedlm(fileid, [M; Φ; ll;  s[1:(n_obs * K)]]', ',')
 
     order_obs = collect(1:n_obs)
     n1 = floor(Int64, ρ * n_obs)
 
-    n_operations = 0
-
-    @inbounds for it in 1:iter
-        fill!(clusters_counts, 0)
-        clusters_counts[1, :] .= particles * N
-        for i in eachindex(particle)
-            particle[i] = 1
-        end
+    for it in 1:iter
+        #for i in eachindex(particle)
+        #    particle[i] = 1
+        #end
         shuffle!(order_obs)
 
         # Update hyperparameters
@@ -155,134 +168,98 @@ function __pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
             update_Φ!(Φ, v, s, Φ_index, γc, K, Γc)
         end
         update_γ!(γc, Φ, v, M, s, Φ_index, c_combn, Γc, N, K)
-        log_γ = log.(γc)
-
         Π = γc ./ sum(γc, dims = 1)
         Z = update_Z(Φ, Φ_index, Γc)
         v = update_v(n_obs, Z)
         update_M!(M, γc, K, N)
 
+        log_γ = log.(γc)
 
         for k = 1:K
-            clusters[k][1] = dataTypes[k](dataFiles[k])
-            clust_ids = Dict{Int, Int}()
+            for i = 1:(N ^ K)
+                Γc[i, k] = log_γ[c_combn[i, k], k]
+            end
+        end
+
+
+        for k = 1:K
             id = 2
             us = unique(s[order_obs[1:(n1 - 1)], k])
             for u in us
-                clusters[k][id] = dataTypes[k](dataFiles[k])
-                clusters_counts[id, k] = particles
-                clusters_counts[1, k] -= particles
-                clust_ids[u] = id
-                particle[u, :, k] .= id
+                append!(clusters[k], [dataTypes[k](dataFiles[k])])
+                for i in order_obs[1:(n1 - 1)]
+                    if s[i, k] == u
+                        cluster_add!(clusters[k][id], dataFiles[k][i, :], featureFlag[k])
+                        particle[k][1].cluster_IDs[s[i, k]] = id
+                        particle[k][1].s[i] = s[i, k]
+                        # sstar[1, i, k] = s[i, k]
+                    end
+                end
                 id += 1
-            end
-            for i in order_obs[1:(n1 - 1)]
-                # id = findall((in)(s[i, k]), us)[1] + 1
-                id = clust_ids[s[i, k]]
-                sstar[:, i, k] .= s[i, k]
-                cluster_add!(clusters[k][id], dataFiles[k][i, :], featureFlag[k])
             end
         end
 
         for i in order_obs[n1:n_obs]
             for k in 1:K
-                fprob_done .= false
-                particle_k = view(particle, :, :, k)
-                logprob_particle = view(logprob, particle_k, k)
+                # particle_k = view(particle, :, :, k)
+                # logprob_particle = view(logprob, particle_k, k)
                 obs = view(dataFiles[k], i, :)
                 # logprob_particle_k = view(logprob_particle, :, :, k)
-                sstar_id_k = view(sstar_id, :, k)
+                # sstar_id_k = view(sstar_id, :, k)
                 Π_k = view(Π, :, k)
-                for id in 1:maximum(particle_k)
-                    logprob[id, k] = calc_logprob(obs, clusters[k][id], featureFlag[k])
-                    n_operations += 1
+                for (id, cluster) in enumerate(clusters[k])
+                    logprob[k][id] = calc_logprob(obs, cluster, featureFlag[k])
                 end
-                # logprob_particle_k = logprob[particle_k, k]
-
 
                 # Draw the new allocations
-                for p in 1:particles
+                for (ind, p) in enumerate(particle[k])
                     # fprob = logprob_particle[:, p]
-                    # fprob_key = hash(sum(particle_k[:, p]))
-                    # fprob_key = string(particle_k[:, p])
-
-                    if fprob_done[particle_id[p, k]]
-                        for n in 1:N
-                        fprob[n] = fprob_dict[n, particle_id[p, k]]
-                        end
-                        logweight[p] += fprob_dict[end, particle_id[p, ]]
-                    else
-                        for n in 1:N
-                             # fprob[n] = Π[n, k] * exp(fprob[n] - max_logprob)
-                             fprob[n] = logprob_particle[n, p]
-                         end
-                         max_logprob = maximum(fprob)
-                         for n in 1:N
-                             fprob[n] -= max_logprob
-                             fprob[n] = exp(fprob[n])
-                             fprob[n] *= Π_k[n]
-                        end
-                        fprob = cumsum!(fprob, fprob)
-                        for n in 1:N
-                            fprob[n] = fprob[n] / fprob[N]
-                        end
-                        # fprob = fprob ./ maximum(fprob)
-                        fprob_dict[1:(end - 1), particle_id[p, k]] = fprob
-                        fprob_dict[end, particle_id[p]] =  log(sum(fprob)) + max_logprob
-                        logweight[p] += log(sum(fprob)) + max_logprob
-                        fprob_done[particle_id[p, k]] = true
+                    for n in 1:N
+                         # fprob[n] = Π[n, k] * exp(fprob[n] - max_logprob)
+                         fprob[n] = logprob[k][p.cluster_IDs[n]]
+                     end
+                     max_logprob = maximum(fprob)
+                     for n in 1:N
+                         fprob[n] -= max_logprob
+                         fprob[n] = exp(fprob[n])
+                         fprob[n] *= Π_k[n]
                     end
+                    p.ξ += log(sum(fprob)) + max_logprob
                     # Set reference trajectory
-                    if p != 1
-                        new_s = 1
-                        u = rand()
-                        for i in 1:(N - 1)
-                            if fprob[new_s] > u
-                                break
-                            else
-                                new_s += 1
-                            end
-                        end
-                        # new_s = sample(1:N, Weights(fprob))
-                    else
-                        new_s = s[i, k]
+                    descendants[1:p.ndescendants] = sample(1:N, Weights(fprob), p.ndescendants)
+                    if ind == 1
+                        descendants[1] = s[i, k]
                     end
-                    particle_id[p, k] *= (N * particles)
-                    particle_id[p, k] += new_s
-                    sstar_id_k[p] = particle[new_s, p, k]
+                    curr_descendant = descendants[1]
+                    for des in 2:p.ndescendants
+                        if descendants[des] != curr_descendant
+                            curr_descendant = descendants[des]
+                            new_p = deepcopy(p)
+                            new_p.n
+                            append!(particle[k], [p])
+                        end
+                    end
+                    return particle[k]
                     sstar[p, i, k] = new_s
                 end
-                canonicalise_IDs!(view(particle_id, :, k))
+
                 # Add observation to new cluster
                 max_k = maximum(particle_k)
                 for p in unique(sstar_id_k)
-                    ncopies = count(x -> x == p, sstar_id_k)
-                    # for s in sstar_id_k
-                    #    if s == p
-                    #        ncopies += 1
-                    #    end
-                    #end
-                    # if wipedout(particle_k, sstar_id_k, p)
-                    if ncopies == clusters_counts[p, k]
+                    if wipedout(particle_k, sstar_id_k, p)
                         # If the origin cluster still exists somewhere
                         # Need to create a new cluster
                         # with obs added to it
                         id = p
                     else
                         id = max_k + 1
-                        clusters_counts[p, k] -= ncopies
-                        clusters_counts[id, k] = ncopies
-                        # clusters[k][id] = deepcopy(clusters[k][p])
-                        clusters[k][id] = copy_particle(clusters[k][p], dataFiles[k])
+                        clusters[k][id] = deepcopy(clusters[k][p])
                         max_k += 1
                     end
                     cluster_add!(clusters[k][id], obs, featureFlag[k])
-                    if id !== p
-                        for part in 1:particles
-                            s_id = sstar[part, i, k]
-                            if particle[s_id, part, k] == p
-                                particle[s_id, part, k] = id
-                            end
+                    for part in 1:particles
+                        if particle[sstar[part, i, k], part, k] == p
+                            particle[sstar[part, i, k], part, k] = id
                         end
                     end
                 end
@@ -292,29 +269,21 @@ function __pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
             end
 
             # Resampling
-            if calc_ESS(logweight) <=  0.5 * particles
+            if calc_ESS(logweight) <= 0.5 * particles
                 partstar = draw_partstar(logweight, particles)
                 logweight .= 1.0
                 for k in 1:K
                     particle[:, :, k] = particle[:, partstar, k]
-                    particle_id[:, k] = particle_id[partstar, k]
-                    canonicalise_IDs!(view(particle_id, :, k))
-                    sstar[:, :, k] = sstar[partstar, :, k]
-                    # Reset clusters_counts
-                    clusters_counts[:, k] .= 0
-                    # Renumber the clusters to ensure elements don't grow too large
-                    particle_k = view(particle, :, :, k)
-                    for (i, id) in enumerate(sort(unique(particle[:, :, k])))
+                    for (i, id) in enumerate(1:(maximum(particle[:, :, k])))
                         if id !== i
+                            particle_k = view(particle, :, :, k)
                             for j in eachindex(particle_k)
                                 if particle_k[j] == id
                                     particle_k[j] = i
                                 end
                             end
-                            # clusters[k][i] = deepcopy(clusters[k][id])
-                            clusters[k][i] = copy_particle(clusters[k][id], dataFiles[k])
+                            clusters[k][i] = deepcopy(clusters[k][id])
                         end
-                        clusters_counts[i, k] = count(x -> x == i, particle_k)
                     end
                 end
             end
@@ -354,16 +323,16 @@ function __pmdi(dataFiles, dataTypes, N::Int64, particles::Int64,
         align_labels!(s, Φ, γc, N, K)
 
         ll = (time_ns() - ll1) / 1.0e9
-        #if it % thin == 0
-        #    writedlm(fileid, [M; Φ; ll; s[1:(n_obs * K)]]', ',')
-        #    if featureSelect != nothing
-        #        writedlm(featureFile, [featureFlag...;]', ',')
-        #    end
-        #end
+        if it % thin == 0
+            writedlm(fileid, [M; Φ; ll; s[1:(n_obs * K)]]', ',')
+            if featureSelect != nothing
+                writedlm(featureFile, [featureFlag...;]', ',')
+            end
+        end
     end
-    # close(fileid)
+    close(fileid)
     if featureSelect != nothing
         close(featureFile)
     end
-    return particle, clusters, clusters_counts, n_operations
+    return
 end
